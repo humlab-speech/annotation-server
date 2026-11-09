@@ -142,7 +142,7 @@ test(
     const sink = await startTcpSink();
     const appPort = await freePort();
     const reposPath = fs.mkdtempSync(path.join(os.tmpdir(), "visp-ws-repos-"));
-    // addLog appends to logs/emu-webapp-server.log relative to cwd
+    // addLog appends to logs/annotation-server.log relative to cwd
     fs.mkdirSync(path.join(repoRoot, "logs"), { recursive: true });
 
     const child = spawn(process.execPath, ["src/main.js"], {

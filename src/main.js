@@ -8,14 +8,15 @@ import dotenv from "dotenv";
 
 import VispAuth from './authModules/visp.module.js';
 import { safePathComponent, safeJoinedPath } from './pathSecurity.js';
+import { findAssignedBundle, mediaBaseUrl } from './bundleAccess.js';
 
 //the only media file type getBundle() hands out URLs for
 const AUDIO_FILE_EXTENSION = "wav";
 
-class EmuWebappServer {
+class AnnotationServer {
   constructor() {
-    this.name = "EMU-webapp-server";
-    this.version = "1.1.0";
+    this.name = "VISP annotation server";
+    this.version = "1.2.0";
     dotenv.config();
     colors.enable();
     this.logLevel = process.env.LOG_LEVEL ? process.env.LOG_LEVEL.toUpperCase() : "INFO";
@@ -112,6 +113,12 @@ class EmuWebappServer {
           return;
         }
         const bundleName = fileName.slice(0, -extensionSuffix.length);
+        if(!await this.assignedBundle(projectId, authResult.user.username, sessionName, bundleName)) {
+          this.addLog("Refusing file "+fileName+" in session "+sessionName+" in project "+projectId+" to "+authResult.user.username+": bundle not assigned to them", "warn");
+          res.status(404);
+          res.send('File not found.');
+          return;
+        }
         const path = safeJoinedPath(this.bundlePath(projectId, sessionName, bundleName), bundleName+extensionSuffix);
         this.addLog("Requested file: "+path, "debug");
 
@@ -202,6 +209,8 @@ class EmuWebappServer {
 
       ws.PHPSESSID = parsedCookies.PHPSESSID;
       ws.projectId = parsedCookies.projectId;
+      //verifyClient admitted this origin; audio URLs for this connection are built on it
+      ws.origin = req?.headers?.origin;
 
       this.addLog("projectId: "+ws.projectId, "debug");
 
@@ -345,10 +354,16 @@ class EmuWebappServer {
   async getBundle(ws, request, user, projectId) {
     const { name, session, callbackID } = request;
 
+    if(!await this.assignedBundle(projectId, user.username, session, name)) {
+      this.addLog("Refusing bundle "+session+"/"+name+" in project "+projectId+" to "+user.username+": not assigned to them", "warn");
+      this.sendError(ws, callbackID, 'This bundle is not assigned to you.');
+      return;
+    }
+
     let bundleBasename = name;
     let bundlePath = this.bundlePath(projectId, session, bundleBasename);
 
-    let mediaUrl = process.env.MEDIA_FILE_BASE_URL+"/file/project/"+encodeURIComponent(projectId)+"/session/"+encodeURIComponent(session)+"/file/"+encodeURIComponent(bundleBasename+"."+AUDIO_FILE_EXTENSION);
+    let mediaUrl = mediaBaseUrl(ws.origin, this.allowedOrigins, process.env.MEDIA_FILE_BASE_URL)+"/file/project/"+encodeURIComponent(projectId)+"/session/"+encodeURIComponent(session)+"/file/"+encodeURIComponent(bundleBasename+"."+AUDIO_FILE_EXTENSION);
 
     //read dbconfig file - this should always exist
     let emuDbConfig = null;
@@ -422,6 +437,12 @@ class EmuWebappServer {
   }
 
 
+  //the user's bundle list entry for session/name in this project, or null (see bundleAccess.js)
+  async assignedBundle(projectId, username, session, name) {
+    const bundleList = await this.db.collection("bundlelists").findOne({projectId: projectId, owner: username});
+    return findAssignedBundle(bundleList, session, name);
+  }
+
   getBundleAnnotationData(bundlePath, bundleName) {
     let annotationDataString = fs.readFileSync(safeJoinedPath(bundlePath, bundleName+"_annot.json"), 'utf8');
     let annotationData = JSON.parse(annotationDataString);
@@ -440,6 +461,13 @@ class EmuWebappServer {
       return;
     }
     let bundleName = reqData.annotation.name.replace(/_annot\.json$/, '');
+
+    let bundleList = await this.db.collection("bundlelists").findOne({projectId: projectId, owner: user.username});
+    if(!findAssignedBundle(bundleList, reqData.session, bundleName)) {
+      this.addLog("Refusing to save bundle "+reqData.session+"/"+bundleName+" in project "+projectId+" for "+user.username+": not assigned to them", "warn");
+      this.sendError(ws, callbackID, 'This bundle is not assigned to you.');
+      return;
+    }
 
     let bundlePath = this.bundlePath(projectId, reqData.session, bundleName);
     //never create bundles, only update existing ones
@@ -467,7 +495,6 @@ class EmuWebappServer {
 
     this.saveBundleAnnotationData(bundlePath, bundleName, reqData.annotation);
 
-    let bundleList = await this.db.collection("bundlelists").findOne({projectId: projectId, owner: user.username});
     if(bundleList) {
       bundleList.bundles.forEach((bundleListItem) => {
         if(bundleListItem.name == bundleName && bundleListItem.session == reqData.session) {
@@ -542,7 +569,7 @@ class EmuWebappServer {
     let printMsg = logMsg+" ["+levelMsgColor+"] "+msg;
     let writeMsg = logMsg+" ["+levelMsg+"] "+msg+"\n";
 
-    let logFile = "logs/emu-webapp-server.log";
+    let logFile = "logs/annotation-server.log";
     switch(level) {
       case 'info':
         console.log(printMsg);
@@ -564,4 +591,4 @@ class EmuWebappServer {
 
 }
 
-new EmuWebappServer();
+new AnnotationServer();

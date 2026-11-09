@@ -1,15 +1,26 @@
-# EMU-webapp-server (VISP)
+# VISP annotation server
 
-WebSocket + file server behind the Artic (EMU-webApp) frontend. In the VISP deployment there
-is **no dedicated `emu-webapp.*` subdomain**: Apache serves the EMU frontend on
-`artic.<BASE_DOMAIN>` and proxies to this server — `ProxyPass /file` plus WebSocket upgrades
-to `emu-webapp-server:17890`. The browser therefore talks to `wss://artic.<BASE_DOMAIN>/`.
+WebSocket + file server that serves a VISP project's EMU-DB over the EMU-webApp websocket
+protocol, to both annotation tools: **Artic** (the EMU-webApp frontend) and **TRATT** (its
+VISP workspace). Named `emu-webapp-server` before VISP 1.2.0.
+
+There is no subdomain of its own. Apache proxies to `annotation-server:17890` from each
+app's host, so every request is same-origin for the app that makes it:
+
+| App | Websocket | Audio |
+|:---|:---|:---|
+| Artic | `wss://artic.<BASE_DOMAIN>/` | `https://artic.<BASE_DOMAIN>/file/…` |
+| TRATT | `wss://tratt.<BASE_DOMAIN>/annotation-ws` | `https://tratt.<BASE_DOMAIN>/file/…` |
+
+Audio URLs in `GETBUNDLE` are built on the origin the websocket came from (falling back to
+`MEDIA_FILE_BASE_URL`). TRATT needs that: it runs under COEP `credentialless`, which strips
+the session cookie from cross-origin requests.
 
 ## Run
 
 - Image: `node:24.15.0-bookworm-slim`, default `CMD npm run dev` (nodemon with `--exitcrash`);
   the prod quadlet overrides the command to `npm start`.
-- Build/run through the deployment repo: `./visp.py build emu-webapp-server`.
+- Build/run through the deployment repo: `./visp.py build annotation-server`.
 
 ## Required environment
 
@@ -21,7 +32,7 @@ retries, so a wrong config shows up as a restart loop in the journal, not a sile
 | `MONGO_URI` | MongoDB connection string |
 | `MONGO_DB_NAME` | Application database |
 | `REPOSITORIES_PATH` | Container path of the project repositories (`/repositories` in the deployment, bind-mounted from the host's `mounts/repositories`) |
-| `MEDIA_FILE_BASE_URL` | Public base URL; also seeds the WebSocket origin allowlist |
+| `MEDIA_FILE_BASE_URL` | Fallback base URL for audio; also the WebSocket origin allowlist when `ALLOWED_ORIGINS` is unset |
 
 Optional: `WS_SERVER_PORT` (default `17890`), `ALLOWED_ORIGINS` (comma-separated origins;
 foreign origins are rejected with 403 at upgrade), `LOG_LEVEL`. Note that `.env-example`
@@ -47,10 +58,13 @@ files are served.
 
 - `WS /` — the EMU-webApp protocol (`GETPROTOCOL`, `GETBUNDLE`, `SAVEBUNDLE`, …;
   auth-gated, origin-checked, re-authorized per message). Bundle media URLs are returned
-  as `mediaFile` entries with `GETURL`-style encoding built from `MEDIA_FILE_BASE_URL`.
+  as `mediaFile` entries with `GETURL`-style encoding, on the connection's origin.
 - `GET /file/project/:projectId/session/:sessionName/file/:fileName` — audio file download,
   same auth + `.wav`-only rule; this is the route Apache proxies.
 - `SAVEBUNDLE` updates **existing** bundles only, and only declared SSFF extensions.
+- `GETBUNDLE`, `SAVEBUNDLE` and `/file` serve only bundles in the user's own bundle list for
+  the project (`bundlelists`, written by VISP's *Assign annotation tasks* dialog); project
+  membership alone is not enough (`src/bundleAccess.js`).
 
 ## Authentication
 

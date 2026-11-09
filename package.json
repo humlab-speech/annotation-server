@@ -1,7 +1,7 @@
 {
-  "name": "emuwebapp-server",
-  "version": "1.0.0",
-  "description": "A server pretending to be an instance of Gitlab for interoperability with Emu-WebApp",
+  "name": "visp-annotation-server",
+  "version": "1.2.0",
+  "description": "Serves VISP EMU-DB bundles to Artic and TRATT over the EMU-webApp websocket protocol",
   "main": "index.js",
   "type": "module",
   "engines": {
@@ -14,14 +14,14 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/humlab-speech/emu-webapp-server.git"
+    "url": "git+https://github.com/humlab-speech/annotation-server.git"
   },
   "author": "",
   "license": "ISC",
   "bugs": {
-    "url": "https://github.com/humlab-speech/emu-webapp-server/issues"
+    "url": "https://github.com/humlab-speech/annotation-server/issues"
   },
-  "homepage": "https://github.com/humlab-speech/emu-webapp-server#readme",
+  "homepage": "https://github.com/humlab-speech/annotation-server#readme",
   "dependencies": {
     "colors": "^1.4.0",
     "cookie": "^0.7.2",

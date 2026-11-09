@@ -65,7 +65,7 @@ test("server exits non-zero when MongoDB is unreachable at boot", { timeout: 300
   const deadPort = await findRefusedPort();
   const appPort = await freePort();
   const reposPath = fs.mkdtempSync(path.join(os.tmpdir(), "visp-mongodown-repos-"));
-  // addLog appends to logs/emu-webapp-server.log relative to cwd
+  // addLog appends to logs/annotation-server.log relative to cwd
   fs.mkdirSync(path.join(repoRoot, "logs"), { recursive: true });
 
   const env = { ...process.env };
