@@ -1,32 +1,97 @@
 /**
  * @description Authentication module for VISP.
- * Validates the PHP session ID against the MongoDB `users` collection: a
- * user is authenticated if a user document carries the same `phpSessionId`,
- * and authorized for a project if that user's username appears in the
- * `members` of the `projects` document with the requested id.
- * It does not call the PHP backend - the PHP API only maintains the
- * `phpSessionId` field that is matched here.
+ *
+ * Who the user is comes from the PHP session store, the only authority on
+ * whether a session is alive: the PHPSESSID is handed to the PHP API's
+ * `?f=session` endpoint (the same check session-manager uses), which answers
+ * with the session's user, or with "[]" when the session is unknown or gone.
+ *
+ * This used to match the cookie against `users.phpSessionId` in MongoDB. That
+ * field holds only the most recent sign-in of a user, so signing in on a
+ * second browser silently locked the first out of Artic and TRATT ("User not
+ * identified"), while the Visp dashboard - which asks PHP - kept working.
+ *
+ * Whether the user may open the project is still read from MongoDB: the
+ * user's username in the `members` of the `projects` document.
  */
+
+/** A confirmed session is trusted this long before PHP is asked again. */
+const SESSION_CACHE_MS = 15 * 1000;
+
+/** How long to wait for the PHP API before giving up. */
+const SESSION_CHECK_TIMEOUT_MS = 5 * 1000;
+
+const DEFAULT_SESSION_URL = "http://apache/api/api.php?f=session";
+
+/**
+ * The user named by the PHP API's `?f=session` answer, or null when the
+ * session is not signed in. The answer is an ApiResponse whose `body` is the
+ * JSON of the session's identity fields, or "[]".
+ */
+export function sessionUserFromResponse(responseText) {
+  const response = JSON.parse(responseText);
+  const body = typeof response?.body === "string" ? JSON.parse(response.body) : null;
+  if (!body || Array.isArray(body) || typeof body.username !== "string" || body.username === "") {
+    return null;
+  }
+  return body;
+}
+
 class VispAuth {
-    constructor(app) {
-        this.app = app;
-        this.name = "VispAuthModule";
-        this.authCacheTimeout = 60*60*1000; // 1 hour
-        this.authCache = [];
+  /**
+   * @param app the server (its `db` and `addLog` are used)
+   * @param options.fetch fetch implementation (tests)
+   * @param options.sessionUrl the PHP API's session check
+   * @param options.now clock (tests)
+   */
+  constructor(app, options = {}) {
+    this.app = app;
+    this.name = "VispAuthModule";
+    this.fetch = options.fetch ?? ((...args) => fetch(...args));
+    this.sessionUrl = options.sessionUrl ?? process.env.SESSION_VALIDATION_URL ?? DEFAULT_SESSION_URL;
+    this.now = options.now ?? (() => Date.now());
+    /** PHPSESSID -> { username, expires }; only live sessions are cached. */
+    this.sessionCache = new Map();
+  }
+
+  /**
+   * The username of the live PHP session, or null if there is none. Throws
+   * when PHP cannot be asked (unreachable, timeout, unreadable answer).
+   */
+  async sessionUsername(phpSessionId) {
+    const cached = this.sessionCache.get(phpSessionId);
+    if (cached && cached.expires > this.now()) {
+      return cached.username;
     }
+    this.sessionCache.delete(phpSessionId);
 
-    getUser(sessionId) {
-      let user = this.authCache.find((element, index, array) => {
-        if(element.sessionId == sessionId) {
-          return this.authCache[index];
-        }
-      });
+    const response = await this.fetch(this.sessionUrl, {
+      headers: { Cookie: "PHPSESSID=" + phpSessionId },
+      signal: AbortSignal.timeout(SESSION_CHECK_TIMEOUT_MS),
+    });
+    if (!response.ok) {
+      throw new Error("session check answered HTTP " + response.status);
+    }
+    const sessionUser = sessionUserFromResponse(await response.text());
+    if (!sessionUser) {
+      return null;
+    }
+    this.pruneCache();
+    this.sessionCache.set(phpSessionId, {
+      username: sessionUser.username,
+      expires: this.now() + SESSION_CACHE_MS,
+    });
+    return sessionUser.username;
+  }
 
-      if(!user) {
-        return false;
+  pruneCache() {
+    const now = this.now();
+    for (const [id, entry] of this.sessionCache) {
+      if (entry.expires <= now) {
+        this.sessionCache.delete(id);
       }
-      return user.userSession;
     }
+  }
 
   async authenticateUser(phpSessionId, projectId) {
     if(!projectId) {
@@ -41,93 +106,59 @@ class VispAuth {
         reason: "No PHP session id provided"
       };
     }
-    //both end up in mongo filters, which must only ever receive plain values
-    if(typeof projectId !== "string" || typeof phpSessionId !== "string") {
+    //both end up in mongo filters or a header, which must only ever receive plain values
+    if(typeof projectId !== "string" || typeof phpSessionId !== "string" || /[;\r\n]/.test(phpSessionId)) {
       return {
         authenticated: false,
         reason: "Invalid credentials"
       };
     }
 
-    let mongo = this.app.db;
-
-    /*
-    this.app.db.collection('users').findOne({phpSessionId: ws.PHPSESSID}).then((user) => {
-      if(user) {
-        this.addLog("User "+user.eppn+" ("+user.username+") connected", "debug");
-      } else {
-        this.addLog("User not identified", "debug");
-      }
-    });
-    */
-
-
-    let users = await mongo.collection("users").find({
-      phpSessionId: phpSessionId
-    }).toArray();
-    if(users.length == 0) {
+    let username;
+    try {
+      username = await this.sessionUsername(phpSessionId);
+    } catch (error) {
+      this.app.addLog("Could not check the PHP session: "+error.message, "error");
+      // Not "not signed in": the user may well be, and should retry.
       return {
         authenticated: false,
-        reason: "User not identified"
+        reason: "Visp could not confirm who you are right now; try again in a moment"
       };
     }
-    let user = users[0];
+    if(!username) {
+      return {
+        authenticated: false,
+        reason: "User not identified (not signed in to Visp)"
+      };
+    }
 
-    let projectsResult = await mongo.collection("projects").find({
+    let mongo = this.app.db;
+    let user = await mongo.collection("users").findOne({ username: username });
+    if(!user) {
+      return {
+        authenticated: false,
+        reason: "User not identified (not signed in to Visp)"
+      };
+    }
+
+    let project = await mongo.collection("projects").findOne({
       id: projectId,
       "members.username": user.username
-    }).toArray();
-    
-
-    if(projectsResult.length == 0) {
+    });
+    if(!project) {
       return {
         authenticated: false,
-        reason: "User not authorized to access the project with id "+projectId
+        reason: "User is not a member of the project with id "+projectId
       };
     }
 
-    this.app.addLog("Authenticated user "+user.eppn+" ("+user.username+")");
+    this.app.addLog("Authenticated user "+user.eppn+" ("+user.username+")", "debug");
 
     return {
       authenticated: true,
       user: user
     };
   }
-
-  authCacheGetAuthorization(sessionId, projectId) {
-    this.authCache.find((element, index, array) => {
-        if(element.sessionId == sessionId && element.projectId == projectId) {
-            if(this.authCache[index].timestamp < new Date().getTime() - this.authCacheTimeout) {
-                return this.authCache[index];
-            }
-            else {
-                return false;
-            }
-        }
-    });
-  }
-
-  updateAuthCache(sessionId, projectId, userSession) {
-    let found = false;
-    this.authCache.find((element, index, array) => {
-        if(element.sessionId == sessionId && element.projectId == projectId) {
-            found = true;
-            this.authCache[index].timestamp = new Date().getTime();
-        }
-    });
-
-    if(!found) {
-        this.authCache.push({
-            sessionId: sessionId,
-            projectId: projectId,
-            userSession: userSession,
-            timestamp: new Date().getTime()
-        });
-    }
-  }
-
 }
-
-//module.exports = VispAuth;
 
 export default VispAuth;
