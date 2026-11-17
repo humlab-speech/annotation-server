@@ -449,9 +449,13 @@ class AnnotationServer {
         encoding: "GETURL"
       },
       ssffFiles: trackFiles,
-      //not part of the EMU-webApp protocol: what SAVEBUNDLE's baseVersion refers to
-      annotationVersion: version,
     };
+    //Not part of the EMU-webApp protocol, so only for a client that asks (TRATT):
+    //Artic validates this response against a schema that refuses any field it
+    //does not know, and would not open the bundle at all.
+    if(request.withVersion === true) {
+      bundleData.annotationVersion = version;
+    }
 
     // Send GETBUNDLE response
     const bundleResponse = {
@@ -584,13 +588,16 @@ class AnnotationServer {
     // Send SAVEBUNDLE response
     const saveBundleResponse = {
       callbackID,
-      //not part of the EMU-webApp protocol: the version the next save is based on
-      data: { annotationVersion: annotationVersion(annotationBytes) },
       status: {
         type: 'SUCCESS',
         message: '',
       },
     };
+    //not part of the EMU-webApp protocol: the version the next save is based on,
+    //for a client that uses versions (TRATT); Artic gets the reply it always got
+    if(reqData.baseVersion !== undefined || reqData.level !== undefined) {
+      saveBundleResponse.data = { annotationVersion: annotationVersion(annotationBytes) };
+    }
     ws.send(JSON.stringify(saveBundleResponse));
   }
 
