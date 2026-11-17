@@ -12,7 +12,10 @@
  * identified"), while the Visp dashboard - which asks PHP - kept working.
  *
  * Whether the user may open the project is still read from MongoDB: the
- * user's username in the `members` of the `projects` document.
+ * user's username in the `members` of the `projects` document. With the
+ * access list on (ACCESS_LIST_ENABLED=true), the user must also hold the
+ * access grant (`users.loginAllowed`), as everywhere else in Visp: a
+ * deactivated user keeps neither Artic nor TRATT through an old membership.
  */
 
 /** A confirmed session is trusted this long before PHP is asked again. */
@@ -43,6 +46,7 @@ class VispAuth {
    * @param options.fetch fetch implementation (tests)
    * @param options.sessionUrl the PHP API's session check
    * @param options.now clock (tests)
+   * @param options.accessListEnabled whether users need the access grant (default: ACCESS_LIST_ENABLED)
    */
   constructor(app, options = {}) {
     this.app = app;
@@ -50,6 +54,7 @@ class VispAuth {
     this.fetch = options.fetch ?? ((...args) => fetch(...args));
     this.sessionUrl = options.sessionUrl ?? process.env.SESSION_VALIDATION_URL ?? DEFAULT_SESSION_URL;
     this.now = options.now ?? (() => Date.now());
+    this.accessListEnabled = options.accessListEnabled ?? String(process.env.ACCESS_LIST_ENABLED).toLowerCase() === "true";
     /** PHPSESSID -> { username, expires }; only live sessions are cached. */
     this.sessionCache = new Map();
   }
@@ -138,6 +143,14 @@ class VispAuth {
       return {
         authenticated: false,
         reason: "User not identified (not signed in to Visp)"
+      };
+    }
+
+    //the same rule as session-manager's authorizeWebSocketUser
+    if(this.accessListEnabled && user.loginAllowed !== true) {
+      return {
+        authenticated: false,
+        reason: "User is not authorized to use Visp (no access grant)"
       };
     }
 

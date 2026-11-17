@@ -3,8 +3,11 @@ import assert from "node:assert/strict";
 
 import VispAuth, { sessionUserFromResponse } from "../src/authModules/visp.module.js";
 
-const users = [{ username: "some_user", eppn: "some_user@example.org" }];
-const projects = [{ id: "p1", members: [{ username: "some_user" }] }];
+const users = [
+  { username: "some_user", eppn: "some_user@example.org", loginAllowed: true },
+  { username: "deactivated_user", eppn: "deactivated_user@example.org", loginAllowed: false },
+];
+const projects = [{ id: "p1", members: [{ username: "some_user" }, { username: "deactivated_user" }] }];
 
 function fakeDb() {
   return {
@@ -38,8 +41,8 @@ function phpApi(sessions) {
   return { fetch, calls };
 }
 
-function auth(fetch, now = () => 0) {
-  return new VispAuth({ db: fakeDb(), addLog: () => {} }, { fetch, now });
+function auth(fetch, now = () => 0, accessListEnabled = false) {
+  return new VispAuth({ db: fakeDb(), addLog: () => {} }, { fetch, now, accessListEnabled });
 }
 
 test("any live session of a user is accepted, not just the most recent sign-in", async () => {
@@ -107,4 +110,18 @@ test("the session answer is read strictly", () => {
   assert.equal(sessionUserFromResponse(JSON.stringify({ body: JSON.stringify({ eppn: "x" }) })), null);
   assert.equal(sessionUserFromResponse(JSON.stringify({ body: JSON.stringify({ username: "u" }) })).username, "u");
   assert.throws(() => sessionUserFromResponse("<html>"));
+});
+
+test("with the access list on, a member without the access grant is refused", async () => {
+  const { fetch } = phpApi({ s: "deactivated_user", t: "some_user" });
+  const a = auth(fetch, () => 0, true);
+  const refused = await a.authenticateUser("s", "p1");
+  assert.equal(refused.authenticated, false);
+  assert.match(refused.reason, /not authorized/);
+  assert.equal((await a.authenticateUser("t", "p1")).authenticated, true);
+});
+
+test("with the access list off, membership is enough (open-access mode)", async () => {
+  const { fetch } = phpApi({ s: "deactivated_user" });
+  assert.equal((await auth(fetch, () => 0, false).authenticateUser("s", "p1")).authenticated, true);
 });
